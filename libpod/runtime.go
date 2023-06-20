@@ -492,8 +492,22 @@ func makeRuntime(runtime *Runtime) (retErr error) {
 		runtime.ociRuntimes[name] = ociRuntime
 	}
 
+	for name, paths := range runtime.config.Engine.OCIRuntimes {
+		ociRuntime, err := newConmonRSOCIRuntime(name, paths, runtime.runtimeFlags, runtime.config)
+		if err != nil {
+			// Don't fatally error.
+			// This will allow us to ship configs including optional
+			// runtimes that might not be installed (crun, kata).
+			// Only an infof so default configs don't spec errors.
+			logrus.Debugf("Configured OCI runtime %s initialization failed (with conmon-rs): %v", name, err)
+			continue
+		}
+		runtime.ociRuntimes["conmon-rs:"+name] = ociRuntime
+	}
+
 	// Do we have a default OCI runtime?
 	if runtime.config.Engine.OCIRuntime != "" {
+		fmt.Println("runtimes:", runtime.ociRuntimes)
 		// If the string starts with / it's a path to a runtime
 		// executable.
 		if strings.HasPrefix(runtime.config.Engine.OCIRuntime, "/") {
