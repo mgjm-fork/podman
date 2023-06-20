@@ -15,6 +15,7 @@ require (
 	github.com/containers/buildah v1.30.1-0.20230504052500-e925b5852e07
 	github.com/containers/common v0.53.1-0.20230615101243-20def0054c6e
 	github.com/containers/conmon v2.0.20+incompatible
+	github.com/containers/conmon-rs v0.5.1
 	github.com/containers/image/v5 v5.25.1-0.20230613183705-07ced6137083
 	github.com/containers/libhvee v0.0.5
 	github.com/containers/ocicrypt v1.1.7
@@ -74,6 +75,7 @@ require (
 )
 
 require (
+	capnproto.org/go/capnp/v3 v3.0.0-alpha.9 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 // indirect
 	github.com/Microsoft/hcsshim v0.10.0-rc.8 // indirect
 	github.com/VividCortex/ewma v1.2.0 // indirect
