@@ -1,13 +1,16 @@
-# capnproto.org/go/capnp/v3 v3.0.0-alpha.9
-## explicit; go 1.18
+# capnproto.org/go/capnp/v3 v3.0.0-alpha.25
+## explicit; go 1.19
 capnproto.org/go/capnp/v3
 capnproto.org/go/capnp/v3/encoding/text
 capnproto.org/go/capnp/v3/exc
+capnproto.org/go/capnp/v3/exp/bufferpool
 capnproto.org/go/capnp/v3/exp/mpsc
+capnproto.org/go/capnp/v3/exp/spsc
 capnproto.org/go/capnp/v3/flowcontrol
-capnproto.org/go/capnp/v3/internal/chanmutex
 capnproto.org/go/capnp/v3/internal/nodemap
+capnproto.org/go/capnp/v3/internal/rc
 capnproto.org/go/capnp/v3/internal/schema
+capnproto.org/go/capnp/v3/internal/str
 capnproto.org/go/capnp/v3/internal/strquote
 capnproto.org/go/capnp/v3/internal/syncutil
 capnproto.org/go/capnp/v3/packed
@@ -198,7 +201,7 @@ github.com/containers/common/version
 # github.com/containers/conmon v2.0.20+incompatible
 ## explicit
 github.com/containers/conmon/runner/config
-# github.com/containers/conmon-rs v0.5.1
+# github.com/containers/conmon-rs v0.5.1 => ../conmon-rs
 ## explicit; go 1.18
 github.com/containers/conmon-rs/internal/proto
 github.com/containers/conmon-rs/pkg/client
@@ -698,7 +701,7 @@ github.com/nxadm/tail/winfile
 # github.com/oklog/ulid v1.3.1
 ## explicit
 github.com/oklog/ulid
-# github.com/onsi/ginkgo/v2 v2.10.0
+# github.com/onsi/ginkgo/v2 v2.11.0
 ## explicit; go 1.18
 github.com/onsi/ginkgo/v2
 github.com/onsi/ginkgo/v2/config
@@ -924,7 +927,7 @@ go.opencensus.io/internal
 go.opencensus.io/trace
 go.opencensus.io/trace/internal
 go.opencensus.io/trace/tracestate
-# go.opentelemetry.io/otel v1.15.0
+# go.opentelemetry.io/otel v1.16.0
 ## explicit; go 1.19
 go.opentelemetry.io/otel
 go.opentelemetry.io/otel/attribute
@@ -937,7 +940,11 @@ go.opentelemetry.io/otel/internal/global
 go.opentelemetry.io/otel/propagation
 go.opentelemetry.io/otel/semconv/internal
 go.opentelemetry.io/otel/semconv/v1.12.0
-# go.opentelemetry.io/otel/trace v1.15.0
+# go.opentelemetry.io/otel/metric v1.16.0
+## explicit; go 1.19
+go.opentelemetry.io/otel/metric
+go.opentelemetry.io/otel/metric/embedded
+# go.opentelemetry.io/otel/trace v1.16.0
 ## explicit; go 1.19
 go.opentelemetry.io/otel/trace
 # golang.org/x/crypto v0.10.0
@@ -1172,4 +1179,8 @@ gopkg.in/yaml.v3
 # sigs.k8s.io/yaml v1.3.0
 ## explicit; go 1.12
 sigs.k8s.io/yaml
+# zenhack.net/go/util v0.0.0-20230218002511-744d2d6d1739
+## explicit; go 1.19
+zenhack.net/go/util
 # github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.1-0.20220617142545-8b9452f75cbc
+# github.com/containers/conmon-rs => ../conmon-rs
