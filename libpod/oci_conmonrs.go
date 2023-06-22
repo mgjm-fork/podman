@@ -314,7 +314,22 @@ func (r *ConmonRSOCIRuntime) UpdateContainerStatus(ctr *Container) error {
 
 // StartContainer starts the given container.
 func (r *ConmonRSOCIRuntime) StartContainer(ctr *Container) error {
-	return r.printError("StartContainer")
+	// TODO: streams should probably *not* be our STDIN/OUT/ERR - redirect to buffers?
+	runtimeDir, err := util.GetRuntimeDir()
+	if err != nil {
+		return err
+	}
+	env := []string{fmt.Sprintf("XDG_RUNTIME_DIR=%s", runtimeDir)}
+	if path, ok := os.LookupEnv("PATH"); ok {
+		env = append(env, fmt.Sprintf("PATH=%s", path))
+	}
+	if err := utils.ExecCmdWithStdStreams(os.Stdin, os.Stdout, os.Stderr, env, r.path, append(r.runtimeFlags, "start", ctr.ID())...); err != nil {
+		return err
+	}
+
+	ctr.state.StartedTime = time.Now()
+
+	return nil
 }
 
 // KillContainer sends the given signal to the given container.
