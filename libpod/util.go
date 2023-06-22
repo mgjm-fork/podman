@@ -311,3 +311,12 @@ func writeStringToPath(path, contents, mountLabel string, uid, gid int) error {
 
 	return nil
 }
+
+func stringSliceContains(slice []string, value string) bool {
+	for _, v := range slice {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}

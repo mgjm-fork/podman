@@ -507,6 +507,7 @@ func makeRuntime(runtime *Runtime) (retErr error) {
 
 	// Do we have a default OCI runtime?
 	if runtime.config.Engine.OCIRuntime != "" {
+		// TODO: remove this
 		fmt.Println("runtimes:", runtime.ociRuntimes)
 		// If the string starts with / it's a path to a runtime
 		// executable.
