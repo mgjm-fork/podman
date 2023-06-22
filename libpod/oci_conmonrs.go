@@ -19,6 +19,7 @@ import (
 
 	"github.com/containers/common/pkg/config"
 	"github.com/containers/common/pkg/resize"
+	cutil "github.com/containers/common/pkg/util"
 	"github.com/containers/conmon-rs/pkg/client"
 	"github.com/containers/podman/v4/libpod/define"
 	"github.com/containers/podman/v4/pkg/rootless"
@@ -58,7 +59,7 @@ func newConmonRSOCIRuntime(name string, paths []string, runtimeFlags []string, r
 
 	runtime := new(ConmonRSOCIRuntime)
 	runtime.name = name
-	runtime.conmonRSPath = "" // TODO: make this configurable?
+	runtime.conmonRSPath = "conmonrs" // TODO: make this configurable?
 	runtime.runtimeFlags = runtimeFlags
 
 	runtime.conmonRSEnv = runtimeCfg.Engine.ConmonEnvVars // TODO: custom conmon-rs env vars?
@@ -629,18 +630,47 @@ func (r *ConmonRSOCIRuntime) ExitFilePath(ctr *Container) (string, error) {
 	return filepath.Join(r.exitsDir, ctr.ID()), nil
 }
 
+// getConmonVersion returns a string representation of the conmon version.
+func (r *ConmonRSOCIRuntime) getConmonRSVersion() (string, error) {
+	output, err := utils.ExecCmd(r.conmonRSPath, "--version")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(strings.Replace(output, "\n", ", ", 1), "\n"), nil
+}
+
+// getOCIRuntimeVersion returns a string representation of the OCI runtime's
+// version.
+func (r *ConmonRSOCIRuntime) getOCIRuntimeVersion() (string, error) {
+	output, err := utils.ExecCmd(r.path, "--version")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(output, "\n"), nil
+}
+
 // RuntimeInfo returns verbose information about the runtime.
 func (r *ConmonRSOCIRuntime) RuntimeInfo() (*define.ConmonInfo, *define.OCIRuntimeInfo, error) {
+	runtimePackage := cutil.PackageVersion(r.path)
+	conmonPackage := cutil.PackageVersion(r.conmonRSPath)
+	runtimeVersion, err := r.getOCIRuntimeVersion()
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting version of OCI runtime %s: %w", r.name, err)
+	}
+	conmonVersion, err := r.getConmonRSVersion()
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting conmon version: %w", err)
+	}
 	conmon := define.ConmonInfo{
-		Package: "todo: package",
+		Package: conmonPackage,
 		Path:    "conmonrs (in PATH)",
-		Version: "todo: version",
+		Version: conmonVersion,
 	}
 	ocirt := define.OCIRuntimeInfo{
 		Name:    r.name,
 		Path:    "todo: path",
-		Package: "todo: package",
-		Version: "todo: version",
+		Package: runtimePackage,
+		Version: runtimeVersion,
 	}
 	return &conmon, &ocirt, nil
 }
