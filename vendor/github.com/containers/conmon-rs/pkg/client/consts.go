@@ -1,5 +1,7 @@
 package client
 
+import "github.com/containers/conmon-rs/internal/proto"
+
 // LogLevel is the enum for all available server log levels.
 type LogLevel string
 
@@ -40,11 +42,11 @@ type CgroupManager int
 const (
 	// CgroupManagerSystemd specifies to use systemd to create and manage
 	// cgroups.
-	CgroupManagerSystemd CgroupManager = iota
+	CgroupManagerSystemd = CgroupManager(proto.Conmon_CgroupManager_systemd)
 
 	// CgroupManagerCgroupfs specifies to use the cgroup filesystem to create
 	// and manage cgroups.
-	CgroupManagerCgroupfs
+	CgroupManagerCgroupfs = CgroupManager(proto.Conmon_CgroupManager_cgroupfs)
 )
 
 // Namespace is the enum for all available namespaces.

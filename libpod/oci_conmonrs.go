@@ -48,9 +48,7 @@ type ConmonRSOCIRuntime struct {
 	supportsNoCgroups bool
 	enableKeyring     bool
 
-	defaultCgroupManager client.CgroupManager
-	cachedCgroupManager  client.CgroupManager
-	cachedClient         *client.ConmonClient
+	cachedClient *client.ConmonClient
 }
 
 func newConmonRSOCIRuntime(name string, paths []string, runtimeFlags []string, runtimeCfg *config.Config) (OCIRuntime, error) {
@@ -121,22 +119,10 @@ func newConmonRSOCIRuntime(name string, paths []string, runtimeFlags []string, r
 		}
 	}
 
-	switch runtimeCfg.Engine.CgroupManager {
-	case config.SystemdCgroupsManager:
-		runtime.defaultCgroupManager = client.CgroupManagerSystemd
-	case config.CgroupfsCgroupsManager:
-		runtime.defaultCgroupManager = client.CgroupManagerCgroupfs
-	default:
-		return nil, fmt.Errorf("unsupported conmon-rs cgroup manager: %q", runtimeCfg.Engine.CgroupManager)
-	}
-
 	return runtime, nil
 }
 
 func (r *ConmonRSOCIRuntime) cgroupManager(ctr *Container) (client.CgroupManager, error) {
-	if ctr == nil {
-		return r.defaultCgroupManager, nil
-	}
 	switch ctr.CgroupManager() {
 	case config.SystemdCgroupsManager:
 		return client.CgroupManagerSystemd, nil
@@ -147,24 +133,17 @@ func (r *ConmonRSOCIRuntime) cgroupManager(ctr *Container) (client.CgroupManager
 	}
 }
 
-func (r *ConmonRSOCIRuntime) client(ctr *Container) (*client.ConmonClient, error) {
-	cgroupManager, err := r.cgroupManager(ctr)
-	if err != nil {
-		return nil, err
-	}
-
-	if r.cachedClient == nil || r.cachedCgroupManager != cgroupManager {
+func (r *ConmonRSOCIRuntime) client() (*client.ConmonClient, error) {
+	if r.cachedClient == nil {
 		// TODO: ServerRunDir = ???
 		serverConfig := client.NewConmonServerConfig(r.path, "", "/run/libpod/conmon-rs")
 		// TODO: serverConfig.LogLevel =
 		serverConfig.LogDriver = client.LogDriverStdout
-		serverConfig.CgroupManager = cgroupManager
 
 		client, err := client.New(serverConfig)
 		if err != nil {
 			return nil, err
 		}
-		r.cachedCgroupManager = cgroupManager
 		r.cachedClient = client
 	}
 	return r.cachedClient, nil
@@ -299,7 +278,12 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 
 	config.EnvVars = r.configureConmonEnv(runtimeDir)
 
-	client, err := r.client(ctr)
+	config.CgroupManager, err = r.cgroupManager(ctr)
+	if err != nil {
+		return 0, err
+	}
+
+	client, err := r.client()
 	if err != nil {
 		return 0, err
 	}
@@ -635,7 +619,7 @@ func (r *ConmonRSOCIRuntime) CheckpointContainer(ctr *Container, options Contain
 // True indicates that Conmon for the instance is running, False
 // indicates it is not.
 func (r *ConmonRSOCIRuntime) CheckConmonRunning(ctr *Container) (bool, error) {
-	return false, r.printError("CheckConmonRunning")
+	return true, nil
 }
 
 // SupportsCheckpoint returns whether this OCI runtime

@@ -631,6 +631,9 @@ type CreateContainerConfig struct {
 	// EnvVars are the environment variables passed to the create runtime call,
 	// in the form "key=value"
 	EnvVars []string
+
+	// CgroupManager can be use to select the cgroup manager.
+	CgroupManager CgroupManager
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -729,6 +732,8 @@ func (c *ConmonClient) CreateContainer(
 		if err := stringSliceToTextList(cfg.EnvVars, req.NewEnvVars); err != nil {
 			return fmt.Errorf("convert environment variables string slice to text list: %w", err)
 		}
+
+		req.SetCgroupManager(proto.Conmon_CgroupManager(cfg.CgroupManager))
 
 		if err := p.SetRequest(req); err != nil {
 			return fmt.Errorf("set request: %w", err)
