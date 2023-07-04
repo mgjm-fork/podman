@@ -26,6 +26,7 @@ import (
 	"github.com/containers/podman/v4/pkg/specgenutil"
 	"github.com/containers/podman/v4/pkg/util"
 	"github.com/containers/podman/v4/utils"
+	"github.com/containers/storage/pkg/homedir"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -211,6 +212,11 @@ func (r *ConmonRSOCIRuntime) CreateContainer(ctr *Container, restoreOptions *Con
 func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *ContainerCheckpointOptions) (int64, error) {
 	var err error
 
+	runtimeDir, err := util.GetRuntimeDir()
+	if err != nil {
+		return 0, err
+	}
+
 	var ociLogPath string
 	if logrus.GetLevel() != logrus.DebugLevel && r.supportsJSON {
 		ociLogPath = filepath.Join(ctr.state.RunDir, "oci-log")
@@ -246,7 +252,7 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 	if ctr.config.LogSize > 0 {
 		maxSize = uint64(ctr.config.LogSize)
 	}
-	config.LogDrivers = []client.ContainerLogDriver{client.ContainerLogDriver{
+	config.LogDrivers = []client.ContainerLogDriver{{
 		Type:    client.LogDriverTypeContainerRuntimeInterface,
 		Path:    ctr.LogPath(),
 		MaxSize: maxSize,
@@ -291,6 +297,8 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 
 	config.CommandArgs = []string{}
 
+	config.EnvVars = r.configureConmonEnv(runtimeDir)
+
 	client, err := r.client(ctr)
 	if err != nil {
 		return 0, err
@@ -305,6 +313,35 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 	ctr.state.PID = int(res.PID)
 
 	return 0, nil
+}
+
+// configureConmonEnv gets the environment values to add to conmon's exec struct
+// TODO this may want to be less hardcoded/more configurable in the future
+func (r *ConmonRSOCIRuntime) configureConmonEnv(runtimeDir string) []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "LC_") {
+			env = append(env, e)
+		}
+	}
+	if path, ok := os.LookupEnv("PATH"); ok {
+		env = append(env, fmt.Sprintf("PATH=%s", path))
+	}
+	if conf, ok := os.LookupEnv("CONTAINERS_CONF"); ok {
+		env = append(env, fmt.Sprintf("CONTAINERS_CONF=%s", conf))
+	}
+	if conf, ok := os.LookupEnv("CONTAINERS_HELPER_BINARY_DIR"); ok {
+		env = append(env, fmt.Sprintf("CONTAINERS_HELPER_BINARY_DIR=%s", conf))
+	}
+	env = append(env, fmt.Sprintf("XDG_RUNTIME_DIR=%s", runtimeDir))
+	env = append(env, fmt.Sprintf("_CONTAINERS_USERNS_CONFIGURED=%s", os.Getenv("_CONTAINERS_USERNS_CONFIGURED")))
+	env = append(env, fmt.Sprintf("_CONTAINERS_ROOTLESS_UID=%s", os.Getenv("_CONTAINERS_ROOTLESS_UID")))
+	home := homedir.Get()
+	if home != "" {
+		env = append(env, fmt.Sprintf("HOME=%s", home))
+	}
+
+	return env
 }
 
 // UpdateContainerStatus updates the status of the given container.
