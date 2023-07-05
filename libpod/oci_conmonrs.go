@@ -138,6 +138,7 @@ func (r *ConmonRSOCIRuntime) client() (*client.ConmonClient, error) {
 		// TODO: ServerRunDir = ???
 		serverConfig := client.NewConmonServerConfig(r.path, "", "/run/libpod/conmon-rs")
 		// TODO: serverConfig.LogLevel =
+		// TODO: log to logfile (set serverConfig.Stdout / Stderr)
 		serverConfig.LogDriver = client.LogDriverStdout
 
 		client, err := client.New(serverConfig)
@@ -201,10 +202,11 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		ociLogPath = filepath.Join(ctr.state.RunDir, "oci-log")
 	}
 
-	if ctr.config.CgroupsMode == cgroupSplit {
-		if err := utils.MoveUnderCgroupSubtree("runtime"); err != nil {
-			return 0, err
-		}
+	switch ctr.config.CgroupsMode {
+	case cgroupSplit:
+		return 0, fmt.Errorf("cgroups mode %q not supported with conmon-rs", ctr.config.CgroupsMode)
+	case "enabled":
+		logrus.Warnf("cgroups mode %q used with conmon-rs, handled as %q", ctr.config.CgroupsMode, "no-conmon")
 	}
 
 	pidfile := ctr.config.PidFile
