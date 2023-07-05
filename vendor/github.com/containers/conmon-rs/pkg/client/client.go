@@ -634,6 +634,9 @@ type CreateContainerConfig struct {
 
 	// CgroupManager can be use to select the cgroup manager.
 	CgroupManager CgroupManager
+
+	// AdditionalFds can be used to pass additional file descriptors to the container.
+	AdditionalFds []RemoteFd
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -730,6 +733,10 @@ func (c *ConmonClient) CreateContainer(
 		}
 
 		if err := stringSliceToTextList(cfg.EnvVars, req.NewEnvVars); err != nil {
+			return fmt.Errorf("convert environment variables string slice to text list: %w", err)
+		}
+
+		if err := remoteFdSliceToUInt64List(cfg.AdditionalFds, req.NewAdditionalFds); err != nil {
 			return fmt.Errorf("convert environment variables string slice to text list: %w", err)
 		}
 
@@ -875,6 +882,22 @@ func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, er
 		if err := list.Set(i, src[i]); err != nil {
 			return fmt.Errorf("set list element: %w", err)
 		}
+	}
+
+	return nil
+}
+
+func remoteFdSliceToUInt64List(src []RemoteFd, newFunc func(int32) (capnp.UInt64List, error)) error {
+	l := int32(len(src))
+	if l == 0 {
+		return nil
+	}
+	list, err := newFunc(l)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(src); i++ {
+		list.Set(i, uint64(src[i]))
 	}
 
 	return nil

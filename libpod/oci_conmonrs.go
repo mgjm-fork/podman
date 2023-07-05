@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -276,8 +277,6 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		return 0, r.printError("create: restoreOptions")
 	}
 
-	config.CommandArgs = []string{}
-
 	config.EnvVars = r.configureConmonEnv(runtimeDir)
 
 	config.CgroupManager, err = r.cgroupManager(ctr)
@@ -285,9 +284,42 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		return 0, err
 	}
 
+	preserveFDs := ctr.config.PreserveFDs
+	if val := os.Getenv("LISTEN_FDS"); val != "" {
+		if ctr.config.PreserveFDs > 0 {
+			logrus.Warnf("Ignoring LISTEN_FDS to preserve custom user-specified FDs")
+		} else {
+			fds, err := strconv.Atoi(val)
+			if err != nil {
+				return 0, fmt.Errorf("converting LISTEN_FDS=%s: %w", val, err)
+			}
+			preserveFDs = uint(fds)
+		}
+	}
+
 	client, err := r.client()
 	if err != nil {
 		return 0, err
+	}
+
+	if preserveFDs > 0 {
+		remoteFds, err := client.RemoteFds(ctx)
+		if err != nil {
+			return 0, err
+		}
+		defer remoteFds.Close()
+
+		fds := make([]int, preserveFDs)
+		for i := uint(0); i < preserveFDs; i++ {
+			fds[i] = int(3 + i)
+		}
+
+		config.AdditionalFds, err = remoteFds.Send(fds...)
+		if err != nil {
+			return 0, err
+		}
+
+		config.CommandArgs = append(config.CommandArgs, "--preserve-fds", fmt.Sprintf("%d", preserveFDs))
 	}
 
 	res, err := client.CreateContainer(ctx, config)
