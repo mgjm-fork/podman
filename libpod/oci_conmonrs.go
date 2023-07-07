@@ -238,14 +238,13 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		maxSize = uint64(ctr.config.LogSize)
 	}
 
-	logDriver := ctr.LogDriver()
-	switch logDriver {
+	switch ctr.LogDriver() {
 	case define.JournaldLogging:
-		fallthrough
+		return 0, fmt.Errorf("%s log driver not supported with conmon-rs", define.JournaldLogging)
 	case define.NoLogging:
-		fallthrough
+		config.LogDrivers = []client.ContainerLogDriver{}
 	case define.PassthroughLogging:
-		return 0, fmt.Errorf("%s log driver not supported with conmon-rs", logDriver)
+		return 0, fmt.Errorf("%s log driver not supported with conmon-rs", define.PassthroughLogging)
 	//lint:ignore ST1015 the default case has to be here
 	default: //nolint:gocritic
 		// No case here should happen except JSONLogging, but keep this here in case the options are extended
