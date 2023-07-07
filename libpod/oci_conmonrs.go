@@ -23,6 +23,7 @@ import (
 	cutil "github.com/containers/common/pkg/util"
 	"github.com/containers/conmon-rs/pkg/client"
 	"github.com/containers/podman/v4/libpod/define"
+	"github.com/containers/podman/v4/pkg/errorhandling"
 	"github.com/containers/podman/v4/pkg/rootless"
 	"github.com/containers/podman/v4/pkg/specgenutil"
 	"github.com/containers/podman/v4/pkg/util"
@@ -203,6 +204,10 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		ociLogPath = filepath.Join(ctr.state.RunDir, "oci-log")
 	}
 
+	if logTag := ctr.LogTag(); logTag != "" {
+		return 0, fmt.Errorf("log tag specified %q, but not supported with conmon-rs", logTag)
+	}
+
 	switch ctr.config.CgroupsMode {
 	case cgroupSplit:
 		return 0, fmt.Errorf("cgroups mode %q not supported with conmon-rs", ctr.config.CgroupsMode)
@@ -210,12 +215,9 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		logrus.Warnf("cgroups mode %q used with conmon-rs, handled as %q", ctr.config.CgroupsMode, "no-conmon")
 	}
 
-	pidfile := ctr.config.PidFile
-	if pidfile == "" {
-		pidfile = filepath.Join(ctr.state.RunDir, "pidfile")
+	if ctr.config.PidFile != "" {
+		return 0, fmt.Errorf("pid file specified %q, but not supported with conmon-rs", ctr.config.PidFile)
 	}
-
-	// args := r.sharedConmonArgs(ctr, ctr.ID(), ctr.bundlePath(), pidfile, ctr.LogPath(), r.exitsDir, ociLog, ctr.LogDriver(), logTag)
 
 	config := new(client.CreateContainerConfig)
 	config.ID = ctr.ID()
@@ -234,11 +236,33 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 	if ctr.config.LogSize > 0 {
 		maxSize = uint64(ctr.config.LogSize)
 	}
-	config.LogDrivers = []client.ContainerLogDriver{{
-		Type:    client.LogDriverTypeContainerRuntimeInterface,
-		Path:    ctr.LogPath(),
-		MaxSize: maxSize,
-	}}
+
+	logDriver := ctr.LogDriver()
+	switch logDriver {
+	case define.JournaldLogging:
+		fallthrough
+	case define.NoLogging:
+		fallthrough
+	case define.PassthroughLogging:
+		return 0, fmt.Errorf("%s log driver not supported with conmon-rs", logDriver)
+	//lint:ignore ST1015 the default case has to be here
+	default: //nolint:gocritic
+		// No case here should happen except JSONLogging, but keep this here in case the options are extended
+		logrus.Errorf("%s logging specified but not supported. Choosing k8s-file logging instead", ctr.LogDriver())
+		fallthrough
+	case "":
+		// to get here, either a user would specify `--log-driver ""`, or this came from another place in libpod
+		// since the former case is obscure, and the latter case isn't an error, let's silently fallthrough
+		fallthrough
+	case define.JSONLogging:
+		fallthrough
+	case define.KubernetesLogging:
+		config.LogDrivers = []client.ContainerLogDriver{{
+			Type:    client.LogDriverTypeContainerRuntimeInterface,
+			Path:    ctr.LogPath(),
+			MaxSize: maxSize,
+		}}
+	}
 
 	config.GlobalArgs = append(config.GlobalArgs, r.runtimeFlags...)
 
@@ -249,6 +273,11 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 	if ctr.config.NoCgroups {
 		logrus.Debugf("Running with no Cgroups")
 		config.GlobalArgs = append(config.GlobalArgs, "--cgroup-manager", "disabled")
+	}
+
+	if ctr.config.SdNotifyMode == define.SdNotifyModeContainer && ctr.config.SdNotifySocket != "" {
+		// TODO
+		return 0, fmt.Errorf("sd-notify mode container not supported with conmon-rs")
 	}
 
 	ctx := context.Background()
@@ -263,6 +292,10 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 
 	}
 
+	if ctr.config.ConmonPidFile != "" {
+		return 0, fmt.Errorf("conmon pid file specified %q, but not supported with conmon-rs", ctr.config.ConmonPidFile)
+	}
+
 	if r.noPivot {
 		config.GlobalArgs = append(config.GlobalArgs, "--no-pivot")
 	}
@@ -272,17 +305,6 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		return 0, err
 	}
 	config.CleanupCmd = append(config.CleanupCmd, ctr.ID())
-
-	if restoreOptions != nil {
-		return 0, r.printError("create: restoreOptions")
-	}
-
-	config.EnvVars = r.configureConmonEnv(runtimeDir)
-
-	config.CgroupManager, err = r.cgroupManager(ctr)
-	if err != nil {
-		return 0, err
-	}
 
 	preserveFDs := ctr.config.PreserveFDs
 	if val := os.Getenv("LISTEN_FDS"); val != "" {
@@ -297,40 +319,122 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		}
 	}
 
+	if preserveFDs > 0 {
+		config.CommandArgs = append(config.CommandArgs, "--preserve-fds", fmt.Sprintf("%d", preserveFDs))
+	}
+
+	if restoreOptions != nil {
+		return 0, r.printError("create: restoreOptions")
+	}
+
+	var filesToClose []*os.File
+	var extraFiles []int
+	if preserveFDs > 0 {
+		for fd := 3; fd < int(3+preserveFDs); fd++ {
+			f := os.NewFile(uintptr(fd), fmt.Sprintf("fd-%d", fd))
+			filesToClose = append(filesToClose, f)
+			extraFiles = append(extraFiles, int(f.Fd()))
+		}
+	}
+
+	config.EnvVars = append(config.EnvVars, r.configureConmonEnv(runtimeDir)...)
+
+	if r.reservePorts && !rootless.IsRootless() && !ctr.config.NetMode.IsSlirp4netns() {
+		ports, err := bindPorts(ctr.convertPortMappings())
+		if err != nil {
+			return 0, err
+		}
+		filesToClose = append(filesToClose, ports...)
+
+		// Leak the port we bound in the conmon process.  These fd's won't be used
+		// by the container and conmon will keep the ports busy so that another
+		// process cannot use them.
+		for _, port := range ports {
+			extraFiles = append(extraFiles, int(port.Fd()))
+		}
+	}
+
+	if ctr.config.NetMode.IsSlirp4netns() || rootless.IsRootless() {
+		if ctr.config.PostConfigureNetNS {
+			havePortMapping := len(ctr.config.PortMappings) > 0
+			if havePortMapping {
+				ctr.rootlessPortSyncR, ctr.rootlessPortSyncW, err = os.Pipe()
+				if err != nil {
+					return 0, fmt.Errorf("failed to create rootless port sync pipe: %w", err)
+				}
+			}
+			ctr.rootlessSlirpSyncR, ctr.rootlessSlirpSyncW, err = os.Pipe()
+			if err != nil {
+				return 0, fmt.Errorf("failed to create rootless network sync pipe: %w", err)
+			}
+		} else {
+			if ctr.rootlessSlirpSyncR != nil {
+				defer errorhandling.CloseQuiet(ctr.rootlessSlirpSyncR)
+			}
+			if ctr.rootlessSlirpSyncW != nil {
+				defer errorhandling.CloseQuiet(ctr.rootlessSlirpSyncW)
+			}
+		}
+		// Leak one end in conmon, the other one will be leaked into slirp4netns
+		extraFiles = append(extraFiles, int(ctr.rootlessSlirpSyncW.Fd()))
+
+		if ctr.rootlessPortSyncW != nil {
+			defer errorhandling.CloseQuiet(ctr.rootlessPortSyncW)
+			// Leak one end in conmon, the other one will be leaked into rootlessport
+			extraFiles = append(extraFiles, int(ctr.rootlessPortSyncW.Fd()))
+		}
+	}
+
+	config.CgroupManager, err = r.cgroupManager(ctr)
+	if err != nil {
+		return 0, err
+	}
+
 	client, err := r.client()
 	if err != nil {
 		return 0, err
 	}
 
-	if preserveFDs > 0 {
+	if len(extraFiles) > 0 {
 		remoteFds, err := client.RemoteFds(ctx)
 		if err != nil {
 			return 0, err
 		}
 		defer remoteFds.Close()
 
-		fds := make([]int, preserveFDs)
-		for i := uint(0); i < preserveFDs; i++ {
-			fds[i] = int(3 + i)
-		}
-
-		config.AdditionalFds, err = remoteFds.Send(fds...)
+		config.AdditionalFds, err = remoteFds.Send(extraFiles...)
 		if err != nil {
 			return 0, err
 		}
 
-		config.CommandArgs = append(config.CommandArgs, "--preserve-fds", fmt.Sprintf("%d", preserveFDs))
+	}
+
+	var runtimeRestoreStarted time.Time
+	if restoreOptions != nil {
+		runtimeRestoreStarted = time.Now()
 	}
 
 	res, err := client.CreateContainer(ctx, config)
 	if err != nil {
 		return 0, err
 	}
-	fmt.Println("CREATED", res.PID, res.NamespacesPath)
 
 	ctr.state.PID = int(res.PID)
 
-	return 0, nil
+	runtimeRestoreDuration := func() int64 {
+		if restoreOptions != nil && restoreOptions.PrintStats {
+			return time.Since(runtimeRestoreStarted).Microseconds()
+		}
+		return 0
+	}()
+
+	// These fds were passed down to the runtime.  Close them
+	// and not interfere
+	for _, f := range filesToClose {
+		errorhandling.CloseQuiet(f)
+	}
+
+	return runtimeRestoreDuration, nil
 }
 
 // configureConmonEnv gets the environment values to add to conmon's exec struct
