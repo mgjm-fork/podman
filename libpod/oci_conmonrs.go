@@ -215,7 +215,8 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		logrus.Warnf("cgroups mode %q used with conmon-rs, handled as %q", ctr.config.CgroupsMode, "no-conmon")
 	}
 
-	if ctr.config.PidFile != "" {
+	// ignore pid file config option if it matches the default location used by conmon-rs
+	if ctr.config.PidFile != "" && ctr.config.PidFile != filepath.Join(ctr.state.RunDir, "pidfile") {
 		return 0, fmt.Errorf("pid file specified %q, but not supported with conmon-rs", ctr.config.PidFile)
 	}
 
@@ -292,7 +293,8 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 
 	}
 
-	if ctr.config.ConmonPidFile != "" {
+	// ignore default path, there is no conmon running per container
+	if ctr.config.ConmonPidFile != "" && ctr.config.ConmonPidFile != filepath.Join(ctr.state.RunDir, "conmon.pid") {
 		return 0, fmt.Errorf("conmon pid file specified %q, but not supported with conmon-rs", ctr.config.ConmonPidFile)
 	}
 
