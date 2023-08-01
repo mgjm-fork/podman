@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"syscall"
@@ -10,91 +11,124 @@ import (
 	"github.com/containers/conmon-rs/internal/proto"
 )
 
-// RemoteFd represents a file descriptor on the server, identified by a slot number.
-type RemoteFd uint64
+var (
+	errTooManyFileDescriptors  = errors.New("too many file descriptors")
+	errResponseTooShort        = errors.New("response too short")
+	errResponseIDDoesNotMatch  = errors.New("response id does not match")
+	errNumberOfFDsDoesNotMatch = errors.New("number of fds does not match")
+	errInvalidResponseLength   = errors.New("invalid response length")
+)
 
-func (r RemoteFd) String() string {
-	return fmt.Sprintf("RemoteFd(%d)", r)
+type serverError string
+
+func (s serverError) Error() string {
+	return fmt.Sprintf("server error: %s", string(s))
 }
 
-// NewRemoteFds can be used to send file descriptors to the server.
-type RemoteFds struct {
+const (
+	uint64Bytes = 8
+
+	maxFDs        = 253
+	msgBufferSize = uint64Bytes + maxFDs*uint64Bytes + 1 // one additional byte used to detect packet truncation
+
+	numFDsBits = 32
+)
+
+// RemoteFD represents a file descriptor on the server, identified by a slot number.
+type RemoteFD uint64
+
+func (r RemoteFD) String() string {
+	return fmt.Sprintf("RemoteFD(%d)", r)
+}
+
+// RemoteFDs can be used to send file descriptors to the server.
+type RemoteFDs struct {
 	conn  *net.UnixConn
-	reqId uint64
+	reqID uint32
 }
 
-// NewRemoteFds connects to the fd socket at `path`.
-func NewRemoteFds(path string) (*RemoteFds, error) {
+// NewRemoteFDs connects to the fd socket at `path`.
+func NewRemoteFDs(path string) (*RemoteFDs, error) {
 	conn, err := DialLongSocket("unixpacket", path)
 	if err != nil {
 		return nil, fmt.Errorf("dial long socket: %w", err)
 	}
-	return &RemoteFds{
+
+	return &RemoteFDs{
 		conn: conn,
 	}, nil
 }
 
 // Send file descriptors to the server.
-func (r *RemoteFds) Send(fds ...int) ([]RemoteFd, error) {
-	if len(fds) > 253 {
-		return nil, fmt.Errorf("too many file descriptors")
+func (r *RemoteFDs) Send(fds ...int) ([]RemoteFD, error) {
+	if len(fds) == 0 {
+		return nil, nil
 	}
 
-	r.reqId += 1
-	id := r.reqId
-	idAndNumFds := id<<8 | uint64(len(fds))
-	b := binary.LittleEndian.AppendUint64(nil, idAndNumFds)
+	if len(fds) > maxFDs {
+		return nil, errTooManyFileDescriptors
+	}
+
+	r.reqID++
+	reqID := r.reqID
+
+	b := binary.LittleEndian.AppendUint64(nil, uint64(reqID)<<numFDsBits|uint64(len(fds)))
 	oob := syscall.UnixRights(fds...)
 	_, _, err := r.conn.WriteMsgUnix(b, oob, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("send request: %w", err)
 	}
 
-	buf := make([]byte, 1024)
+	buf := make([]byte, msgBufferSize)
 	n, err := r.conn.Read(buf)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("receviree reaponse: %w", err)
 	}
 	buf = buf[:n]
 
-	if len(buf) < 8 {
-		return nil, fmt.Errorf("response too short")
+	if len(buf) < uint64Bytes {
+		return nil, errResponseTooShort
 	}
 
-	resIdAndNumFds := binary.LittleEndian.Uint64(buf[:8])
+	resIDAndNumFDs := binary.LittleEndian.Uint64(buf[:8])
 	buf = buf[8:]
 
-	if resIdAndNumFds>>8 != id {
-		return nil, fmt.Errorf("response id does not match: %d (expected %d)", resIdAndNumFds>>8, id)
+	if resID := uint32(resIDAndNumFDs >> numFDsBits); resID != reqID {
+		return nil, fmt.Errorf("%w: %d (expected %d)", errResponseIDDoesNotMatch, resID, reqID)
 	}
 
-	numFds := int(resIdAndNumFds & 0xff)
-	if numFds == 0xff {
-		return nil, fmt.Errorf("server error: %s", string(buf))
+	numFDs := int(resIDAndNumFDs & (1<<numFDsBits - 1))
+	if numFDs == 1<<numFDsBits-1 {
+		return nil, serverError(buf)
 	}
 
-	if numFds != len(fds) {
-		return nil, fmt.Errorf("number of fds does not match: %d (expected %d)", numFds, len(fds))
+	if numFDs != len(fds) {
+		return nil, fmt.Errorf("%w: %d (expected %d)", errNumberOfFDsDoesNotMatch, numFDs, len(fds))
 	}
 
-	if len(buf) != numFds*8 {
-		return nil, fmt.Errorf("invalid response length")
+	if len(buf) != numFDs*uint64Bytes {
+		return nil, errInvalidResponseLength
 	}
 
-	slots := make([]RemoteFd, 0, numFds)
-	for i := 0; i < numFds; i++ {
-		slots = append(slots, RemoteFd(binary.LittleEndian.Uint64(buf[i*8:])))
+	slots := make([]RemoteFD, 0, numFDs)
+	for i := 0; i < numFDs; i++ {
+		slots = append(slots, RemoteFD(binary.LittleEndian.Uint64(buf[i*uint64Bytes:])))
 	}
+
 	return slots, nil
 }
 
 // Close the connection and unused remote file descriptors.
-func (r *RemoteFds) Close() error {
-	return r.conn.Close()
+func (r *RemoteFDs) Close() error {
+	if err := r.conn.Close(); err != nil {
+		return fmt.Errorf("close fd socket: %w", err)
+	}
+
+	return nil
 }
 
-// RemoteFds can be used start and connect to the remote fd socket.
-func (c *ConmonClient) RemoteFds(ctx context.Context) (*RemoteFds, error) {
+// RemoteFDs can be used start and connect to the remote fd socket.
+func (c *ConmonClient) RemoteFDs(ctx context.Context) (*RemoteFDs, error) {
 	ctx, span := c.startSpan(ctx, "AttachContainer")
 	if span != nil {
 		defer span.End()
@@ -118,12 +152,8 @@ func (c *ConmonClient) RemoteFds(ctx context.Context) (*RemoteFds, error) {
 			return fmt.Errorf("create request: %w", err)
 		}
 
-		metadata, err := c.metadataBytes(ctx)
-		if err != nil {
-			return fmt.Errorf("get metadata: %w", err)
-		}
-		if err := req.SetMetadata(metadata); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
 		}
 
 		return nil
@@ -145,7 +175,7 @@ func (c *ConmonClient) RemoteFds(ctx context.Context) (*RemoteFds, error) {
 		return nil, fmt.Errorf("get path: %w", err)
 	}
 
-	r, err := NewRemoteFds(path)
+	r, err := NewRemoteFDs(path)
 	if err != nil {
 		return nil, fmt.Errorf("connect to remote fd socket: %w", err)
 	}
