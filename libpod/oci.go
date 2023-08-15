@@ -164,9 +164,8 @@ type AttachOptions struct {
 	// detach is impossible. If unset, defaults from containers.conf will be
 	// used.
 	DetachKeys *string
-	// InitialSize is the initial size of the terminal. Set before the
-	// attach begins.
-	InitialSize *resize.TerminalSize
+	// Resize is a stream of resize events.
+	Resize <-chan resize.TerminalSize
 	// AttachReady signals when the attach has successfully completed and
 	// streaming has begun.
 	AttachReady chan<- bool

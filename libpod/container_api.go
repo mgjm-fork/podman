@@ -169,16 +169,12 @@ func (c *Container) StartAndAttach(ctx context.Context, streams *define.AttachSt
 
 	// Attach to the container before starting it
 	go func() {
-		// Start resizing
-		if c.LogDriver() != define.PassthroughLogging {
-			registerResizeFunc(resize, c.bundlePath())
-		}
-
 		opts := new(AttachOptions)
 		opts.Streams = streams
 		opts.DetachKeys = &keys
 		opts.Start = true
 		opts.Started = startedChan
+		opts.Resize = resize
 
 		if err := c.ociRuntime.Attach(c, opts); err != nil {
 			attachChan <- err

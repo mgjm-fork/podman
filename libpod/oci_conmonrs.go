@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,6 +30,7 @@ import (
 	"github.com/containers/podman/v4/pkg/util"
 	"github.com/containers/podman/v4/utils"
 	"github.com/containers/storage/pkg/homedir"
+	"github.com/moby/term"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -131,7 +133,7 @@ func (r *ConmonRSOCIRuntime) cgroupManager(ctr *Container) (client.CgroupManager
 	case config.CgroupfsCgroupsManager:
 		return client.CgroupManagerCgroupfs, nil
 	default:
-		return -1, fmt.Errorf("unsupported conmon-rs cgroup manager: %q", ctr.CgroupManager())
+		return client.CgroupManagerSystemd, fmt.Errorf("unsupported conmon-rs cgroup manager: %q", ctr.CgroupManager())
 	}
 }
 
@@ -142,6 +144,8 @@ func (r *ConmonRSOCIRuntime) client() (*client.ConmonClient, error) {
 		// TODO: serverConfig.LogLevel =
 		// TODO: log to logfile (set serverConfig.Stdout / Stderr)
 		serverConfig.LogDriver = client.LogDriverStdout
+		serverConfig.CgroupManager = client.CgroupManagerPerCommand
+		// serverConfig.ShutdownDelay = 10 * time.Second
 
 		client, err := client.New(serverConfig)
 		if err != nil {
@@ -224,11 +228,8 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 	config.ID = ctr.ID()
 	config.BundlePath = ctr.bundlePath()
 
-	if ctr.Terminal() {
-		config.Terminal = true
-	} else if ctr.config.Stdin {
-		config.Stdin = true
-	}
+	config.Terminal = ctr.Terminal()
+	config.Stdin = ctr.Stdin()
 
 	config.ExitPaths = []string{filepath.Join(r.exitsDir, ctr.ID())}
 	config.OOMExitPaths = []string{} // TODO
@@ -289,7 +290,6 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 
 	if !r.enableKeyring {
 		config.GlobalArgs = append(config.GlobalArgs, "--no-new-keyring")
-
 	}
 
 	// ignore default path, there is no conmon running per container
@@ -338,7 +338,7 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 		}
 	}
 
-	config.EnvVars = append(config.EnvVars, r.configureConmonEnv(runtimeDir)...)
+	config.EnvVars = r.configureConmonEnv(runtimeDir)
 
 	if r.reservePorts && !rootless.IsRootless() && !ctr.config.NetMode.IsSlirp4netns() {
 		ports, err := bindPorts(ctr.convertPortMappings())
@@ -397,17 +397,19 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 	}
 
 	if len(extraFiles) > 0 {
-		remoteFds, err := client.RemoteFds(ctx)
+		remoteFDs, err := client.RemoteFDs(ctx)
 		if err != nil {
 			return 0, err
 		}
-		defer remoteFds.Close()
+		defer remoteFDs.Close()
 
-		config.AdditionalFds, err = remoteFds.Send(extraFiles...)
+		fds, err := remoteFDs.Send(extraFiles...)
 		if err != nil {
 			return 0, err
 		}
 
+		config.AdditionalFDs = fds[:preserveFDs]
+		config.LeakFDs = fds[preserveFDs:]
 	}
 
 	var runtimeRestoreStarted time.Time
@@ -440,28 +442,29 @@ func (r *ConmonRSOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *
 
 // configureConmonEnv gets the environment values to add to conmon's exec struct
 // TODO this may want to be less hardcoded/more configurable in the future
-func (r *ConmonRSOCIRuntime) configureConmonEnv(runtimeDir string) []string {
-	var env []string
+func (r *ConmonRSOCIRuntime) configureConmonEnv(runtimeDir string) map[string]string {
+	env := map[string]string{}
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "LC_") {
-			env = append(env, e)
+			if key, value, found := strings.Cut(e, "="); found {
+				env[key] = value
+			}
 		}
 	}
 	if path, ok := os.LookupEnv("PATH"); ok {
-		env = append(env, fmt.Sprintf("PATH=%s", path))
+		env["PATH"] = path
 	}
 	if conf, ok := os.LookupEnv("CONTAINERS_CONF"); ok {
-		env = append(env, fmt.Sprintf("CONTAINERS_CONF=%s", conf))
+		env["CONTAINERS_CONF"] = conf
 	}
 	if conf, ok := os.LookupEnv("CONTAINERS_HELPER_BINARY_DIR"); ok {
-		env = append(env, fmt.Sprintf("CONTAINERS_HELPER_BINARY_DIR=%s", conf))
+		env["CONTAINERS_HELPER_BINARY_DIR"] = conf
 	}
-	env = append(env, fmt.Sprintf("XDG_RUNTIME_DIR=%s", runtimeDir))
-	env = append(env, fmt.Sprintf("_CONTAINERS_USERNS_CONFIGURED=%s", os.Getenv("_CONTAINERS_USERNS_CONFIGURED")))
-	env = append(env, fmt.Sprintf("_CONTAINERS_ROOTLESS_UID=%s", os.Getenv("_CONTAINERS_ROOTLESS_UID")))
-	home := homedir.Get()
-	if home != "" {
-		env = append(env, fmt.Sprintf("HOME=%s", home))
+	env["XDG_RUNTIME_DIR"] = runtimeDir
+	env["_CONTAINERS_USERNS_CONFIGURED"] = os.Getenv("_CONTAINERS_USERNS_CONFIGURED")
+	env["_CONTAINERS_ROOTLESS_UID"] = os.Getenv("_CONTAINERS_ROOTLESS_UID")
+	if home := homedir.Get(); home != "" {
+		env["HOME"] = home
 	}
 
 	return env
@@ -666,9 +669,98 @@ func (r *ConmonRSOCIRuntime) UnpauseContainer(ctr *Container) error {
 	return r.printError("UnpauseContainer")
 }
 
+func printPtr(p any) string {
+	v := reflect.ValueOf(p)
+	for v.Kind() == reflect.Pointer && !v.IsNil() {
+		v = v.Elem()
+	}
+	return fmt.Sprint(v.Interface())
+}
+
 // Attach to a container.
 func (r *ConmonRSOCIRuntime) Attach(ctr *Container, params *AttachOptions) error {
-	return r.printError("Attach")
+	logrus.WithFields(logrus.Fields{
+		"DetachKeys":   printPtr(params.DetachKeys),
+		"Start":        params.Start,
+		"AttachInput":  params.Streams.AttachInput,
+		"AttachOutput": params.Streams.AttachOutput,
+		"AttachError":  params.Streams.AttachError,
+		"Terminal":     ctr.Terminal(),
+		"Stdin":        ctr.Stdin(),
+	}).Warnln("attach")
+
+	var err error
+
+	keys := config.DefaultDetachKeys
+	if params.DetachKeys != nil {
+		keys = *params.DetachKeys
+	}
+
+	config := new(client.AttachConfig)
+
+	config.ID = ctr.ID()
+	config.SocketPath, err = r.AttachSocketPath(ctr)
+	if err != nil {
+		return err
+	}
+
+	config.Tty = ctr.Terminal()
+	config.ContainerStdin = ctr.Stdin()
+	config.StopAfterStdinEOF = true
+	config.Resize = params.Resize
+
+	if params.Streams.AttachInput {
+		config.Streams.Stdin = &client.In{
+			ReadCloser: io.NopCloser(params.Streams.InputStream),
+		}
+	}
+	if params.Streams.AttachOutput {
+		config.Streams.Stdout = &client.Out{
+			WriteCloser: params.Streams.OutputStream,
+		}
+	}
+	if params.Streams.AttachError {
+		config.Streams.Stderr = &client.Out{
+			WriteCloser: params.Streams.ErrorStream,
+		}
+	}
+
+	if params.Start {
+		config.PreAttachFunc = func() error {
+			if err := r.StartContainer(ctr); err != nil {
+				return err
+			}
+			params.Started <- true
+			return nil
+		}
+	}
+
+	config.PostAttachFunc = func() error {
+		if params.AttachReady != nil {
+			params.AttachReady <- true
+		}
+		return nil
+	}
+
+	if keys != "" {
+		config.DetachKeys, err = term.ToBytes(keys)
+		if err != nil {
+			return fmt.Errorf("invalid detach keys: %w", err)
+		}
+	}
+
+	client, err := r.client()
+	if err != nil {
+		return err
+	}
+
+	if err := client.AttachContainer(context.Background(), config); err != nil {
+		logrus.Errorf("attach done: %v", err)
+		return err
+	}
+
+	logrus.Warn("attach done: ok")
+	return nil
 }
 
 // HTTPAttach performs an attach intended to be transported over HTTP.
@@ -689,6 +781,7 @@ func (r *ConmonRSOCIRuntime) HTTPAttach(ctr *Container, req *http.Request, w htt
 
 // AttachResize resizes the terminal in use by the given container.
 func (r *ConmonRSOCIRuntime) AttachResize(ctr *Container, newSize resize.TerminalSize) error {
+	logrus.Warn("resize:", newSize)
 	return r.printError("AttachResize")
 }
 
@@ -788,7 +881,11 @@ func (r *ConmonRSOCIRuntime) SupportsKVM() bool {
 // AttachSocketPath is the path to the socket to attach to a given
 // container.
 func (r *ConmonRSOCIRuntime) AttachSocketPath(ctr *Container) (string, error) {
-	return "", r.printError("AttachSocketPath")
+	if ctr == nil {
+		return "", fmt.Errorf("must provide a valid container to get attach socket path: %w", define.ErrInvalidArg)
+	}
+
+	return filepath.Join(ctr.bundlePath(), "attach"), nil
 }
 
 // ExecAttachSocketPath is the path to the socket to attach to a given
